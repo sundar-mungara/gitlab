@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-init
+  namespace: test-namespace
+spec:
+  template:
+    spec:
+      containers:
+      - name: mysql-init
+        image: mysql:8.0
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          echo "Waiting for MySQL to be ready..."
+          until mysql -h mysql-service.test-namespace.svc.cluster.local -uroot -prootpassword -e "SELECT 1" &>/dev/null; do
+            echo "MySQL is not ready yet. Waiting..."
+            sleep 2
+          done
+          echo "MySQL is ready!"
+          
+          echo "Creating table results..."
+          mysql -h mysql-service.test-namespace.svc.cluster.local -uroot -prootpassword testdb <<EOF
+          CREATE TABLE IF NOT EXISTS results (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            test_id VARCHAR(50),
+            status VARCHAR(10),
+            executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          EOF
+          
+          echo "Inserting test record..."
+          mysql -h mysql-service.test-namespace.svc.cluster.local -uroot -prootpassword testdb <<EOF
+          INSERT INTO results (test_id, status) VALUES ('TEST-001', 'pass');
+          EOF
+          
+          echo "Verifying insertion..."
+          mysql -h mysql-service.test-namespace.svc.cluster.local -uroot -prootpassword testdb -e "SELECT * FROM results;"
+          
+          echo "MySQL initialization completed successfully!"
+      restartPolicy: OnFailure
+

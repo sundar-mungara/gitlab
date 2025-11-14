@@ -1,0 +1,76 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: elasticsearch-init
+  namespace: test-namespace
+spec:
+  template:
+    spec:
+      containers:
+      - name: elasticsearch-init
+        image: curlimages/curl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "Waiting for Elasticsearch to be ready..."
+          until curl -s http://elasticsearch-service.test-namespace.svc.cluster.local:9200/_cluster/health | grep -q '"status":"green"\|"status":"yellow"'; do
+            echo "Elasticsearch is not ready yet. Waiting..."
+            sleep 2
+          done
+          echo "Elasticsearch is ready!"
+          
+          echo "Creating index test-results..."
+          curl -X PUT "http://elasticsearch-service.test-namespace.svc.cluster.local:9200/test-results" -H 'Content-Type: application/json' -d'
+          {
+            "mappings": {
+              "properties": {
+                "test_id": { "type": "keyword" },
+                "name": { "type": "text" },
+                "status": { "type": "keyword" },
+                "duration_ms": { "type": "integer" },
+                "timestamp": { "type": "date" }
+              }
+            }
+          }'
+          echo ""
+          
+          echo "Inserting test records..."
+          curl -X POST "http://elasticsearch-service.test-namespace.svc.cluster.local:9200/test-results/_doc" -H 'Content-Type: application/json' -d'
+          {
+            "test_id": "VAFT-001",
+            "name": "Test Case 1",
+            "status": "pass",
+            "duration_ms": 150,
+            "timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"
+          }'
+          echo ""
+          
+          curl -X POST "http://elasticsearch-service.test-namespace.svc.cluster.local:9200/test-results/_doc" -H 'Content-Type: application/json' -d'
+          {
+            "test_id": "VAFT-004",
+            "name": "Test Case 4",
+            "status": "pass",
+            "duration_ms": 200,
+            "timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"
+          }'
+          echo ""
+          
+          curl -X POST "http://elasticsearch-service.test-namespace.svc.cluster.local:9200/test-results/_doc" -H 'Content-Type: application/json' -d'
+          {
+            "test_id": "VAFT-005",
+            "name": "Test Case 5",
+            "status": "fail",
+            "duration_ms": 100,
+            "timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"
+          }'
+          echo ""
+          
+          echo "Refreshing index..."
+          curl -X POST "http://elasticsearch-service.test-namespace.svc.cluster.local:9200/test-results/_refresh"
+          echo ""
+          
+          echo "Elasticsearch initialization completed successfully!"
+      restartPolicy: OnFailure
+

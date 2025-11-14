@@ -1,0 +1,186 @@
+stages:
+  - build
+  - deploy
+  - test
+
+variables:
+  KUBERNETES_NAMESPACE: test-namespace
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    # Export environment variables
+    - export AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID"
+    - export AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
+    - export AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION"
+  script:
+    - echo "Starting build stage..."
+    
+    # Verify Docker is available
+    - docker --version
+    
+    # Check if devops-tools image exists, if not build it
+    - |
+      if docker images devops-tools | grep -q devops-tools; then
+        echo "devops-tools image already exists, skipping build..."
+      else
+        echo "Building devops-tools Docker image..."
+        docker build -t devops-tools .
+      fi
+    
+    # Verify the image exists
+    - docker images | grep devops-tools || (echo "ERROR: devops-tools image not found!" && exit 1)
+    
+    # Test the image by running verification commands
+    - echo "Verifying devops-tools image..."
+    - docker run --rm devops-tools aws --version
+    - docker run --rm devops-tools vault version
+    - docker run --rm devops-tools kubectl version --client
+    - docker run --rm devops-tools python3 --version
+    - docker run --rm devops-tools pytest --version
+    
+    # Validate Kubernetes manifests using kubectl from the image
+    - echo "Validating Kubernetes manifests..."
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools kubectl apply --dry-run=client -f deployments/mysql-deployment.yaml
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools kubectl apply --dry-run=client -f deployments/mysql-init-job.yaml
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools kubectl apply --dry-run=client -f deployments/elasticsearch-deployment.yaml
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools kubectl apply --dry-run=client -f deployments/elasticsearch-init-job.yaml
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools kubectl apply --dry-run=client -f deployments/nginx-deployment.yaml
+    
+    # Validate Python test files
+    - echo "Validating test files..."
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools python3 -m py_compile tests/test_mysql.py
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools python3 -m py_compile tests/test_elasticsearch.py
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools python3 -m py_compile tests/test_nginx.py
+    - docker run --rm -v $(pwd):/workspace -w /workspace devops-tools python3 -m py_compile tests/conftest.py
+    
+    # Verify requirements.txt syntax
+    - echo "Verifying requirements.txt..."
+    - test -f requirements.txt && echo "requirements.txt exists" || (echo "ERROR: requirements.txt not found!" && exit 1)
+    - cat requirements.txt
+    
+    - echo "Build stage completed successfully!"
+  artifacts:
+    expire_in: 1 hour
+    paths:
+      - Dockerfile
+
+deploy:
+  stage: deploy
+  image: devops-tools
+  before_script:
+    # Export environment variables
+    - export AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID"
+    - export AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
+    - export AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION"
+    - echo "VAULT_ADDR is $VAULT_ADDR"
+    - echo "VAULT_TOKEN is $VAULT_TOKEN"
+    
+    # Get kubeconfig from Vault
+    - vault kv get -field=value secret/kubeconfig | base64 -d > kubeconfig
+    - export KUBECONFIG=$(pwd)/kubeconfig
+    
+    # Verify kubectl access
+    - kubectl cluster-info
+    - kubectl get nodes
+    
+    # Get node IP for tests
+    - export KUBERNETES_NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+    - echo "Kubernetes Node IP: $KUBERNETES_NODE_IP"
+    - export MYSQL_NODE_IP=$KUBERNETES_NODE_IP
+    - export ES_NODE_IP=$KUBERNETES_NODE_IP
+    - export NGINX_NODE_IP=$KUBERNETES_NODE_IP
+  script:
+    - echo "Starting deployment stage..."
+    
+    # Create namespace
+    - kubectl apply -f deployments/mysql-deployment.yaml
+    - kubectl apply -f deployments/elasticsearch-deployment.yaml
+    - kubectl apply -f deployments/nginx-deployment.yaml
+    
+    # Wait for deployments to be ready
+    - echo "Waiting for MySQL deployment to be ready..."
+    - kubectl wait --for=condition=available --timeout=300s deployment/mysql -n $KUBERNETES_NAMESPACE || true
+    - kubectl wait --for=condition=ready --timeout=300s pod -l app=mysql -n $KUBERNETES_NAMESPACE || true
+    
+    - echo "Waiting for Elasticsearch deployment to be ready..."
+    - kubectl wait --for=condition=available --timeout=300s deployment/elasticsearch -n $KUBERNETES_NAMESPACE || true
+    - kubectl wait --for=condition=ready --timeout=300s pod -l app=elasticsearch -n $KUBERNETES_NAMESPACE || true
+    
+    - echo "Waiting for Nginx deployment to be ready..."
+    - kubectl wait --for=condition=available --timeout=300s deployment/nginx -n $KUBERNETES_NAMESPACE || true
+    - kubectl wait --for=condition=ready --timeout=300s pod -l app=nginx -n $KUBERNETES_NAMESPACE || true
+    
+    # Wait for services to be ready
+    - echo "Waiting for services to be ready..."
+    - sleep 10
+    
+    # Run initialization jobs
+    - echo "Running MySQL initialization job..."
+    - kubectl apply -f deployments/mysql-init-job.yaml
+    - kubectl wait --for=condition=complete --timeout=300s job/mysql-init -n $KUBERNETES_NAMESPACE || true
+    - kubectl logs job/mysql-init -n $KUBERNETES_NAMESPACE || true
+    
+    - echo "Running Elasticsearch initialization job..."
+    - kubectl apply -f deployments/elasticsearch-init-job.yaml
+    - kubectl wait --for=condition=complete --timeout=300s job/elasticsearch-init -n $KUBERNETES_NAMESPACE || true
+    - kubectl logs job/elasticsearch-init -n $KUBERNETES_NAMESPACE || true
+    
+    # Show deployment status
+    - echo "Deployment status:"
+    - kubectl get pods -n $KUBERNETES_NAMESPACE
+    - kubectl get services -n $KUBERNETES_NAMESPACE
+    - kubectl get jobs -n $KUBERNETES_NAMESPACE
+    
+    - echo "Deployment stage completed successfully!"
+
+test:
+  stage: test
+  image: devops-tools
+  dependencies:
+    - build
+    - deploy
+  script:
+    - echo "Starting test stage..."
+    
+    # Export environment variables again
+    - export AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID"
+    - export AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
+    - export AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION"
+    - echo "VAULT_ADDR is $VAULT_ADDR"
+    - echo "VAULT_TOKEN is $VAULT_TOKEN"
+    - vault kv get -field=value secret/kubeconfig | base64 -d > kubeconfig
+    - export KUBECONFIG=$(pwd)/kubeconfig
+    
+    # Get node IP
+    - export KUBERNETES_NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+    - echo "Kubernetes Node IP: $KUBERNETES_NODE_IP"
+    - export MYSQL_NODE_IP=$KUBERNETES_NODE_IP
+    - export ES_NODE_IP=$KUBERNETES_NODE_IP
+    - export NGINX_NODE_IP=$KUBERNETES_NODE_IP
+    
+    # Verify pods are still running
+    - kubectl get pods -n $KUBERNETES_NAMESPACE
+    
+    # Install Python dependencies
+    - pip3 install -r requirements.txt
+    
+    # Run pytest tests
+    - echo "Running MySQL tests..."
+    - pytest tests/test_mysql.py -v
+    
+    - echo "Running Elasticsearch tests..."
+    - pytest tests/test_elasticsearch.py -v
+    
+    - echo "Running Nginx tests..."
+    - pytest tests/test_nginx.py -v
+    
+    # Run all tests together with coverage
+    - echo "Running all tests with coverage..."
+    - pytest tests/ -v --cov=tests --cov-report=term-missing
+    
+    - echo "Test stage completed successfully!"
+
