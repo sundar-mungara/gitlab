@@ -9,8 +9,6 @@ variables:
 build:
   stage: build
   image: docker:latest
-  services:
-    - docker:dind
   before_script:
     # Export environment variables
     - export AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID"
@@ -32,7 +30,11 @@ build:
       fi
     
     # Verify the image exists
-    - docker images | grep devops-tools || (echo "ERROR: devops-tools image not found!" && exit 1)
+    - |
+      if ! docker images | grep -q devops-tools; then
+        echo "ERROR: devops-tools image not found!"
+        exit 1
+      fi
     
     # Test the image by running verification commands
     - echo "Verifying devops-tools image..."
@@ -59,7 +61,12 @@ build:
     
     # Verify requirements.txt syntax
     - echo "Verifying requirements.txt..."
-    - test -f requirements.txt && echo "requirements.txt exists" || (echo "ERROR: requirements.txt not found!" && exit 1)
+    - |
+      if [ ! -f requirements.txt ]; then
+        echo "ERROR: requirements.txt not found!"
+        exit 1
+      fi
+      echo "requirements.txt exists"
     - cat requirements.txt
     
     - echo "Build stage completed successfully!"
@@ -88,11 +95,12 @@ deploy:
     - kubectl get nodes
     
     # Get node IP for tests
-    - export KUBERNETES_NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-    - echo "Kubernetes Node IP: $KUBERNETES_NODE_IP"
-    - export MYSQL_NODE_IP=$KUBERNETES_NODE_IP
-    - export ES_NODE_IP=$KUBERNETES_NODE_IP
-    - export NGINX_NODE_IP=$KUBERNETES_NODE_IP
+    - |
+      export KUBERNETES_NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+      echo "Kubernetes Node IP: $KUBERNETES_NODE_IP"
+      export MYSQL_NODE_IP=$KUBERNETES_NODE_IP
+      export ES_NODE_IP=$KUBERNETES_NODE_IP
+      export NGINX_NODE_IP=$KUBERNETES_NODE_IP
   script:
     - echo "Starting deployment stage..."
     
@@ -156,11 +164,12 @@ test:
     - export KUBECONFIG=$(pwd)/kubeconfig
     
     # Get node IP
-    - export KUBERNETES_NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-    - echo "Kubernetes Node IP: $KUBERNETES_NODE_IP"
-    - export MYSQL_NODE_IP=$KUBERNETES_NODE_IP
-    - export ES_NODE_IP=$KUBERNETES_NODE_IP
-    - export NGINX_NODE_IP=$KUBERNETES_NODE_IP
+    - |
+      export KUBERNETES_NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+      echo "Kubernetes Node IP: $KUBERNETES_NODE_IP"
+      export MYSQL_NODE_IP=$KUBERNETES_NODE_IP
+      export ES_NODE_IP=$KUBERNETES_NODE_IP
+      export NGINX_NODE_IP=$KUBERNETES_NODE_IP
     
     # Verify pods are still running
     - kubectl get pods -n $KUBERNETES_NAMESPACE
